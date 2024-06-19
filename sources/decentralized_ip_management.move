@@ -5,12 +5,15 @@ module decentralized_ip_management::ip_management {
     use sui::object::{Self, UID, ID};
     use sui::transfer::{public_transfer};
     use sui::event;
+    use std::vector;
 
     // Error Definitions
     const UNAUTHORIZED_ACCESS: u64 = 1;
     const LICENSE_NOT_FOUND: u64 = 3;
     const INSUFFICIENT_FUNDS: u64 = 4;
     const DISPUTE_NOT_FOUND: u64 = 5;
+    const IP_NOT_FOUND: u64 = 6;
+    const LICENSE_ALREADY_EXISTS: u64 = 7;
 
     // Struct representing an intellectual property
     struct IntellectualProperty has key, store {
@@ -20,6 +23,7 @@ module decentralized_ip_management::ip_management {
         ip_type: vector<u8>,
         description: vector<u8>,
         is_registered: bool,
+        related_licenses: vector<UID>, // New feature: Track related licenses
     }
 
     // Struct representing a license agreement
@@ -31,6 +35,7 @@ module decentralized_ip_management::ip_management {
         terms: vector<u8>,
         royalty_amount: u64,
         is_active: bool,
+        expiration_date: u64, // New feature: License expiration date
     }
 
     // Struct representing a dispute
@@ -41,6 +46,7 @@ module decentralized_ip_management::ip_management {
         respondent: address,
         details: vector<u8>,
         is_resolved: bool,
+        resolution: vector<u8>, // New feature: Add resolution details
     }
 
     // Events
@@ -52,6 +58,7 @@ module decentralized_ip_management::ip_management {
     struct IPTransferred has copy, drop { id: ID, from: address, to: address }
     struct IPUpdated has copy, drop { id: ID, updated_by: address, new_description: vector<u8> }
     struct LicenseUpdated has copy, drop { id: ID, updated_by: address, new_terms: vector<u8> }
+    struct LicenseExpired has copy, drop { id: ID, ip_id: UID }
 
     // Register a new intellectual property
     public fun register_ip(title: vector<u8>, ip_type: vector<u8>, description: vector<u8>, ctx: &mut TxContext): IntellectualProperty {
@@ -63,6 +70,7 @@ module decentralized_ip_management::ip_management {
             ip_type,
             description,
             is_registered: true,
+            related_licenses: vector::empty<UID>(), // Initialize related licenses
         };
         event::emit(
             IPRegistered { 
@@ -75,7 +83,7 @@ module decentralized_ip_management::ip_management {
     }
 
     // Create a license agreement
-    public fun create_license(ip_id: UID, licensee: address, terms: vector<u8>, royalty_amount: u64, ctx: &mut TxContext): LicenseAgreement {
+    public fun create_license(ip_id: UID, licensee: address, terms: vector<u8>, royalty_amount: u64, expiration_date: u64, ctx: &mut TxContext): LicenseAgreement {
         let licensor = sender(ctx);
         let license_id = object::new(ctx);
         let license = LicenseAgreement {
@@ -86,7 +94,14 @@ module decentralized_ip_management::ip_management {
             terms,
             royalty_amount,
             is_active: true,
+            expiration_date,
         };
+
+        // Ensure the IP exists and add license to its related licenses
+        let ip = &mut move_get_object_ref!(ip_id) as &mut IntellectualProperty;
+        assert!(ip.is_registered, IP_NOT_FOUND);
+        vector::push_back(&mut ip.related_licenses, license.id);
+
         event::emit(
             LicenseCreated { 
                 id: object::uid_to_inner(&license.id), 
@@ -128,6 +143,7 @@ module decentralized_ip_management::ip_management {
             respondent,
             details,
             is_resolved: false,
+            resolution: vector::empty<u8>(), // Initialize resolution
         };
         event::emit(
             DisputeCreated { 
@@ -145,6 +161,7 @@ module decentralized_ip_management::ip_management {
         assert!(!dispute.is_resolved, DISPUTE_NOT_FOUND);
 
         dispute.is_resolved = true;
+        dispute.resolution = resolution;
 
         // Emit dispute resolution event
         event::emit(
@@ -202,18 +219,36 @@ module decentralized_ip_management::ip_management {
         );
     }
 
+    // Check and expire licenses
+    public fun check_and_expire_licenses(ctx: &mut TxContext) {
+        let current_time = tx_context::timestamp(ctx);
+        let all_licenses = move_get_all_objects::<LicenseAgreement>();
+
+        for license in all_licenses {
+            if (license.is_active && license.expiration_date <= current_time) {
+                license.is_active = false;
+                event::emit(
+                    LicenseExpired {
+                        id: object::uid_to_inner(&license.id),
+                        ip_id: license.ip_id,
+                    }
+                );
+            }
+        }
+    }
+
     // View IP details
-    public fun view_ip_details(ip: &IntellectualProperty): (vector<u8>, address, vector<u8>, vector<u8>, bool) {
-        (ip.title, ip.creator, ip.ip_type, ip.description, ip.is_registered)
+    public fun view_ip_details(ip: &IntellectualProperty): (vector<u8>, address, vector<u8>, vector<u8>, bool, vector<UID>) {
+        (ip.title, ip.creator, ip.ip_type, ip.description, ip.is_registered, ip.related_licenses.clone())
     }
 
     // View license details
-    public fun view_license_details(license: &LicenseAgreement): (UID, address, address, vector<u8>, u64, bool) {
-        (license.ip_id, license.licensee, license.licensor, license.terms, license.royalty_amount, license.is_active)
+    public fun view_license_details(license: &LicenseAgreement): (UID, address, address, vector<u8>, u64, u64, bool) {
+        (license.ip_id, license.licensee, license.licensor, license.terms, license.royalty_amount, license.expiration_date, license.is_active)
     }
 
     // View dispute details
-    public fun view_dispute_details(dispute: &Dispute): (UID, address, address, vector<u8>, bool) {
-        (dispute.ip_id, dispute.claimant, dispute.respondent, dispute.details, dispute.is_resolved)
+    public fun view_dispute_details(dispute: &Dispute): (UID, address, address, vector<u8>, bool, vector<u8>) {
+        (dispute.ip_id, dispute.claimant, dispute.respondent, dispute.details, dispute.is_resolved, dispute.resolution.clone())
     }
 }
